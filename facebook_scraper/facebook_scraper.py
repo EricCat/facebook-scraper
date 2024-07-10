@@ -11,6 +11,7 @@ from urllib.parse import parse_qs, urlparse, unquote
 from datetime import datetime
 import os
 
+from bs4 import BeautifulSoup
 from requests import RequestException
 from requests_html import HTMLSession
 
@@ -36,7 +37,7 @@ from .page_iterators import (
     iter_pages,
     iter_photos,
     iter_search_pages,
-    iter_hashtag_pages,
+    iter_hashtag_pages, PageParser,
 )
 from . import exceptions
 
@@ -67,6 +68,7 @@ class FacebookScraper:
         self.session = session
         self.requests_kwargs = requests_kwargs
         self.request_count = 0
+        self.mbasic_headers = None
 
     def set_user_agent(self, user_agent):
         self.session.headers["User-Agent"] = user_agent
@@ -97,10 +99,11 @@ class FacebookScraper:
         )
         logger.debug(f"Fetching {reaction_url}")
         response = self.get(reaction_url)
-        extractor = PostExtractor(response.html, kwargs, self.get, full_post_html=response.html)
+        extractor = PostExtractor(response.html, kwargs, self.get, full_post_html=response.html, scraper=self)
         return extractor.extract_reactors(response)
 
     def get_photos(self, account: str, **kwargs) -> Iterator[Post]:
+        kwargs["scraper"] = self
         iter_pages_fn = partial(iter_photos, account=account, request_fn=self.get, **kwargs)
         return self._generic_get_posts(extract_post, iter_pages_fn, **kwargs)
 
@@ -112,17 +115,20 @@ class FacebookScraper:
         )
         return self._generic_get_posts(extract_hashtag_post, iter_pages_fn, **kwargs)
 
-    def get_posts_by_url(self, post_urls, options={}, remove_source=True) -> Iterator[Post]:
+    def get_posts_by_url(
+        self, post_urls, options={}, remove_source=True, **kwargs
+    ) -> Iterator[Post]:
+        kwargs["scraper"] = self
         if self.session.cookies.get("noscript") == "1":
             options["noscript"] = True
         for post_url in post_urls:
             url = str(post_url)
             if url.startswith(FB_BASE_URL):
-                url = url.replace(FB_BASE_URL, FB_MOBILE_BASE_URL)
+                url = url.replace(FB_BASE_URL, FB_MBASIC_BASE_URL)
             if url.startswith(FB_W3_BASE_URL):
-                url = url.replace(FB_W3_BASE_URL, FB_MOBILE_BASE_URL)
+                url = url.replace(FB_W3_BASE_URL, FB_MBASIC_BASE_URL)
             if not url.startswith(FB_MOBILE_BASE_URL):
-                url = utils.urljoin(FB_MOBILE_BASE_URL, url)
+                url = utils.urljoin(FB_MBASIC_BASE_URL, url)
 
             post = {"original_request_url": post_url, "post_url": url}
             logger.debug(f"Requesting page from: {url}")
@@ -132,7 +138,8 @@ class FacebookScraper:
             if "/stories/" in url or "/story/" in url:
                 elem = response.html.find("#story_viewer_content", first=True)
             else:
-                elem = response.html.find('[data-ft*="top_level_post_id"]', first=True)
+                # top_level_post_id is not used anymore
+                elem = response.html.find('[data-ft]', first=True)
                 if not elem:
                     elem = response.html.find('div.async_like', first=True)
                 if response.html.find("div.msg", first=True):
@@ -158,15 +165,17 @@ class FacebookScraper:
                             request_fn=self.get,
                             options=options,
                             full_post_html=response.html,
+                            **kwargs,
                         )
                     )
-                elif url.startswith(utils.urljoin(FB_MOBILE_BASE_URL, "/groups/")):
+                elif url.startswith(utils.urljoin(FB_MBASIC_BASE_URL, "/groups/")):
                     post.update(
                         extract_group_post(
                             elem,
                             request_fn=self.get,
                             options=options,
                             full_post_html=response.html,
+                            **kwargs,
                         )
                     )
                 elif "/stories/" in url or "/story/" in url:
@@ -176,6 +185,7 @@ class FacebookScraper:
                             request_fn=self.get,
                             options=options,
                             full_post_html=response.html,
+                            **kwargs,
                         )
                     )
                 else:
@@ -185,6 +195,7 @@ class FacebookScraper:
                             request_fn=self.get,
                             options=options,
                             full_post_html=response.html,
+                            **kwargs,
                         )
                     )
                 if not post.get("post_url"):
@@ -617,106 +628,46 @@ class FacebookScraper:
 
     def get_page_info(self, page, **kwargs) -> Profile:
         result = {}
-        desc = None
 
         try:
-            about_url = f'/{page}/about/'
-            logger.debug(f"Requesting page from: {about_url}")
-            resp = self.get(about_url)
-            result["name"] = resp.html.find("title", first=True).text.replace(" - About", "")
-            desc = resp.html.find("meta[name='description']", first=True)
-            result["about"] = resp.html.find(
-                '#pages_msite_body_contents,div.aboutme', first=True
-            ).text
-            cover_photo = resp.html.find("#msite-pages-header-contents i.coverPhoto", first=True)
-            if cover_photo:
-                match = re.search(r"url\('(.+)'\)", cover_photo.attrs["style"])
-                if match:
-                    result["cover_photo"] = utils.decode_css_url(match.groups()[0])
-            profile_photo = resp.html.find("#msite-pages-header-contents img", first=True)
-            if profile_photo:
-                result["profile_photo"] = profile_photo.attrs["src"]
-        except Exception as e:
-            logger.error(e)
-        try:
-            url = f'/{page}/'
-            logger.debug(f"Requesting page from: {url}")
-            resp = self.get(url)
-            result["id"] = re.search(r'pages/transparency/(\d+)', resp.html.html).group(1)
-            result["name"] = resp.html.find("title", first=True).text.replace(" - Home", "")
-            desc = resp.html.find("meta[name='description']", first=True)
-            ld_json = None
-            try:
-                ld_json = resp.html.find("script[type='application/ld+json']", first=True).text
-            except:
-                logger.error("No ld+json element")
-                url = f'/{page}/community'
-                logger.debug(f"Requesting page from: {url}")
-                try:
-                    community_resp = self.get(url)
-                    try:
-                        ld_json = community_resp.html.find(
-                            "script[type='application/ld+json']", first=True
-                        ).text
-                    except:
-                        logger.error("No ld+json element")
-                        likes_and_follows = community_resp.html.find(
-                            "#page_suggestions_on_liking+div", first=True
-                        ).text.split("\n")
-                        result["followers"] = utils.convert_numeric_abbr(likes_and_follows[2])
-                except:
-                    pass
-            if ld_json:
-                meta = demjson.decode(ld_json)
-                result.update(meta["author"])
-                result["type"] = result.pop("@type")
-                for interaction in meta.get("interactionStatistic", []):
-                    if interaction["interactionType"] == "http://schema.org/FollowAction":
-                        result["followers"] = interaction["userInteractionCount"]
-            try:
-                result["about"] = resp.html.find(
-                    '#pages_msite_body_contents>div>div:nth-child(2)', first=True
-                ).text
-            except Exception as e:
-                logger.error(e)
-                result = self.get_profile(page)
-            for elem in resp.html.find("div[data-sigil*='profile-intro-card-log']"):
-                text = elem.text.split("\n")[0]
-                if " Followers" in text:
-                    result["followers"] = utils.convert_numeric_abbr(
-                        text.replace(" Followers", "")
-                    )
-                if text.startswith("Price Range"):
-                    result["Price Range"] = text.split(" · ")[-1]
-                link = elem.find("a[href]", first=True)
-                if link:
-                    link = link.attrs["href"]
-                    if "active_ads" in link:
-                        result["active_ads_link"] = link
-                    if "maps.google.com" in link:
-                        result["map_link"] = parse_qs(urlparse(link).query).get("u")[0]
-                        result["address"] = text
-                    if link.startswith("tel:"):
-                        result["phone"] = link.replace("tel:", "")
-                    if link.startswith("mailto:"):
-                        result["email"] = link.replace("mailto:", "")
-            result["rating"] = resp.html.find("div[data-nt='FB:TEXT4']")[1].text
-        except Exception as e:
-            logger.error(e)
-        if desc:
-            logger.debug(desc.attrs["content"])
-            match = re.search(r'\..+?(\d[\d,.]+).+·', desc.attrs["content"])
-            if match:
-                result["likes"] = utils.parse_int(match.groups()[0])
-            bits = desc.attrs["content"].split("·")
-            if len(bits) == 3:
-                result["people_talking_about_this"] = utils.parse_int(bits[1])
-                result["checkins"] = utils.parse_int(bits[2])
-        if kwargs.get("reviews"):
-            result["reviews"] = self.get_page_reviews(page, **kwargs)
-            if kwargs.get("reviews") != "generator":
-                result["reviews"] = utils.safe_consume(result["reviews"])
+            logger.debug("getting page info using mbasic url")
+            # mbasic info
+            page_url = utils.urljoin(FB_MBASIC_BASE_URL, page)
+            resp = self.get(page_url)
+            container = resp.html.find("div#objects_container", first=True)
+            name_element =  container.find("strong", first=True)
+            result["name"] = name_element.text
+            soupElement = BeautifulSoup(container.html, features='html.parser')
+            ancestorElement = soupElement.select('strong')[0].find_parent('div')
+            if ancestorElement.find_parent('span'):
+                ancestorElement = ancestorElement.find_parent('span').find_parent('div')
+            description_element = ancestorElement.find_next_sibling("div")
+            logger.debug("description_element")
+            logger.debug(description_element)
+            result["description"] = description_element.text
+            result['category'] = soupElement.select('#category span')[1].text
 
+            # getting basic info for a page
+            def has_text(element):
+                 return element.get_text(strip=True) != '' and not len(element.find_all(True)) > 0
+
+            contact_info_elements = soupElement.select("#contact-info")[0].find_all(has_text)
+            basic_info_elements = soupElement.select("#basic-info")[0].find_all(has_text)
+            result['contact_info'] = {contact_info_elements[i].text: contact_info_elements[i + 1].text for i in range(1, len(contact_info_elements), 2)}
+            result['basic_info'] = {basic_info_elements[i].text: basic_info_elements[i + 1].text for i in range(0, len(basic_info_elements), 2)}
+            logger.debug("getting page_id and user_id usong page_info from PageParser")
+            page_basic_info = PageParser(resp).get_page_info()
+            result.update(page_basic_info)
+
+            result['url'] = resp.url
+            logger.debug("extracting HQ profile photo")
+            extractor = PostExtractor(resp.html, kwargs, self.get)
+            image_elements = resp.html.find("a[href^='/photo.php']")
+            result["cover_picture"] = extractor.extract_photo_link_HQ(response=None, useMbasic=True, mbasicUrl=utils.urljoin(FB_MBASIC_BASE_URL, image_elements[0].attrs['href']))
+            result["profile_picture"] = extractor.extract_photo_link_HQ(response=None, useMbasic=True, mbasicUrl=utils.urljoin(FB_MBASIC_BASE_URL, image_elements[1].attrs['href']))
+
+        except Exception as e:
+            logger.error(f"Unable to extract page info: {e}")
         return result
 
     def get_group_info(self, group, **kwargs) -> Profile:
@@ -839,6 +790,7 @@ class FacebookScraper:
         return results
 
     def get_group_posts(self, group: Union[str, int], **kwargs) -> Iterator[Post]:
+        kwargs["scraper"] = self
         self.set_user_agent(
             "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_12_6) AppleWebKit/603.3.8 (KHTML, like Gecko) Version/10.1.2 Safari/603.3.8"
         )
@@ -868,7 +820,13 @@ class FacebookScraper:
                 kwargs.pop("post")
                 response = self.session.post(url=url, **kwargs)
             else:
+                if url.startswith(FB_MBASIC_BASE_URL) and self.mbasic_headers is not None:
+                    self.session.headers.clear()
+                    self.session.headers.update(self.mbasic_headers)
                 response = self.session.get(url=url, **self.requests_kwargs, **kwargs)
+                if url.startswith(FB_MBASIC_BASE_URL) and self.mbasic_headers is not None:
+                    self.session.headers.clear()
+                    self.session.headers.update(self.default_headers)
             DEBUG = False
             if DEBUG:
                 for filename in os.listdir("."):
@@ -938,6 +896,7 @@ class FacebookScraper:
                     title.text == "Log in to Facebook | Facebook"
                     or response.url.startswith(utils.urljoin(FB_MOBILE_BASE_URL, "login"))
                     or response.url.startswith(utils.urljoin(FB_W3_BASE_URL, "login"))
+                    or response.url.startswith(utils.urljoin(FB_MBASIC_BASE_URL, "login"))
                 ):
                     raise exceptions.LoginRequired(
                         "A login (cookies) is required to see this page"
@@ -1017,7 +976,6 @@ class FacebookScraper:
         max_past_limit=5,
         **kwargs,
     ):
-
         if options is None:
             options = {}
         elif isinstance(options, set):
@@ -1034,7 +992,6 @@ class FacebookScraper:
 
         # if latest_date is specified, iterate until the date is reached n times in a row (recurrent_past_posts)
         if latest_date is not None:
-
             # Pinned posts repeat themselves over time, so ignore them
             pinned_posts = []
 
@@ -1048,10 +1005,11 @@ class FacebookScraper:
             done = False
 
             for page in iter_pages_fn():
-
                 for post_element in page:
                     try:
-                        post = extract_post_fn(post_element, options=options, request_fn=self.get)
+                        post = extract_post_fn(
+                            post_element, options=options, request_fn=self.get, **kwargs
+                        )
 
                         if remove_source:
                             post.pop("source", None)
@@ -1114,8 +1072,16 @@ class FacebookScraper:
             logger.debug("Starting to iterate pages")
             for i, page in zip(counter, iter_pages_fn()):
                 logger.debug("Extracting posts from page %s", i)
+                # extra_info is already in the kwargs, so we pop it out
+                kwargs.pop("extra_info", None)
                 for post_element in page:
-                    post = extract_post_fn(post_element, options=options, request_fn=self.get)
+                    post = extract_post_fn(
+                        post_element,
+                        options=options,
+                        request_fn=self.get,
+                        extra_info=page.extra_info,
+                        **kwargs,
+                    )
                     if remove_source:
                         post.pop('source', None)
                     yield post

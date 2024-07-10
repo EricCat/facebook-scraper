@@ -11,29 +11,56 @@
 [![Code style: black](https://img.shields.io/badge/code%20style-black-000000.svg)](https://github.com/psf/black)
 
 Scrape Facebook public pages without an API key. Inspired by [twitter-scraper](https://github.com/kennethreitz/twitter-scraper).
+This is the repo from [moda20 version](https://github.com/moda20/facebook_page_scraper)
+
+
+## Contributions
+We are moving a bit slowly on updates, so if you want to help please check the [TODO](#to-do) section below
+
 
 ## Install
 
-To install the latest release from PyPI:
+To install the latest release from PyPI (original version):
 
 ```sh
 pip install facebook-scraper
 ```
 
-Or, to install the latest master branch:
+Or, to install this latest master branch:
 
 ```sh
-pip install git+https://github.com/kevinzg/facebook-scraper.git
+pip install git+https://github.com/EricCat/facebook-scraper.git@master
+```
+
+Or, to force update the branch after an update : 
+
+```sh
+pip install --force-reinstall --no-deps git+https://github.com/EricCat/facebook-scraper.git@master
+```
+
+And to add it to your requirements.txt manually : 
+
+```
+facebook-scraper @ git+https://github.com/EricCat/facebook-scraper.git@master
 ```
 
 ## Usage
 
-Send the unique **page name, profile name, or ID** as the first parameter and you're good to go:
+in order to get everything running right, follow these steps
 
+1. Send the unique **page name, profile name, or ID** as the first parameter 
+2. Specify the base_url and start_url to use the mbasic page instead
+3. Get the mbasicHeaders that you want to use and read them from a file in order to inject them into the scraper.
+**you can get these headers from opening an example page and selecting a high-end device in the developer tools (such as samsung s20 ultra)
+. This will help with getting newer versions of posts and higher fidelity images.**
 ```python
->>> from facebook_scraper import get_posts
+from facebook_scraper import get_posts, _scraper
+import json
 
->>> for post in get_posts('nintendo', pages=1):
+with open('./mbasicHeaders.json', 'r') as file:
+    _scraper.mbasic_headers = json.load(file)
+
+for post in get_posts('NintendoAmerica', base_url="https://mbasic.facebook.com", start_url="https://mbasic.facebook.com/NintendoAmerica?v=timeline", pages=1):
 ...     print(post['text'][:50])
 ...
 The final step on the road to the Super Smash Bros
@@ -44,23 +71,56 @@ We’re headed to PAX East 3/28-3/31 with new games
 
 *(For the `get_posts` function)*.
 
-- **group**: group id, to scrape groups instead of pages. Default is `None`.
-- **pages**: how many pages of posts to request, the first 2 pages may have no results, so try with a number greater than 2. Default is 10.
-- **timeout**: how many seconds to wait before timing out. Default is 30.
-- **credentials**: tuple of user and password to login before requesting the posts. Default is `None`.
-- **extra_info**: bool, if true the function will try to do an extra request to get the post reactions. Default is False.
-- **youtube_dl**: bool, use Youtube-DL for (high-quality) video extraction. You need to have youtube-dl installed on your environment. Default is False.
-- **post_urls**: list, URLs or post IDs to extract posts from. Alternative to fetching based on username.
-- **cookies**: One of:
+* **group**: group id, to scrape groups instead of pages. Default is `None`.
+* **pages**: how many pages of posts to request, the first 2 pages may have no results, so try with a number greater than 2. Default is 10.
+* **timeout**: how many seconds to wait before timing out. Default is 30.
+* **credentials**: tuple of user and password to login before requesting the posts. Default is `None`.
+* **extra_info**: bool, if true the function will try to do an extra request to get the post reactions. Default is False.
+* **youtube_dl**: bool, use Youtube-DL for (high-quality) video extraction. You need to have youtube-dl installed on your environment. Default is False.
+* **post_urls**: list, URLs or post IDs to extract posts from. Alternative to fetching based on username.
+* **cookies**: One of:
   - The path to a file containing cookies in Netscape or JSON format. You can extract cookies from your browser after logging into Facebook with an extension like [Get cookies.txt LOCALLY](https://chrome.google.com/webstore/detail/get-cookiestxt-locally/cclelndahbckbenkjhflpdbgdldlbecc) or [Cookie Quick Manager (Firefox)](https://addons.mozilla.org/en-US/firefox/addon/cookie-quick-manager/). Make sure that you include both the c_user cookie and the xs cookie, you will get an InvalidCookies exception if you don't.
   - A [CookieJar](https://docs.python.org/3.9/library/http.cookiejar.html#http.cookiejar.CookieJar)
   - A dictionary that can be converted to a CookieJar with [cookiejar_from_dict](https://2.python-requests.org/en/master/api/#requests.cookies.cookiejar_from_dict)
   - The string `"from_browser"` to try extract Facebook cookies from your browser
-- **options**: Dictionary of options. Set `options={"comments": True}` to extract comments, set `options={"reactors": True}` to extract the people reacting to the post.
-Both `comments` and `reactors` can also be set to a number to set a limit for the amount of comments/reactors to retrieve.
-Set `options={"progress": True}` to get a `tqdm` progress bar while extracting comments and replies.
-Set `options={"allow_extra_requests": False}` to disable making extra requests when extracting post data (required for some things like full text and image links).
-Set `options={"posts_per_page": 200}` to request 200 posts per page. The default is 4.
+* **options**: Dictionary of options. 
+  * Set `options={"comments": True}` to extract comments.
+  * Set `options={"reactors": True}` to extract the people reacting to the post. 
+  * Set `options={"reactions": True}` to extract the reactions of the post. Similar to `reactors` but only extracts reactions and not the people who reacted. Makes only one request per post 
+  * Both `comments` and `reactors` can also be set to a number to set a limit for the amount of comments/reactors to retrieve.
+  * Set `options={"progress": True}` to get a `tqdm` progress bar while extracting comments and replies.
+  * Set `options={"allow_extra_requests": False}` to disable making extra requests when extracting post data (required for some things like full text and image links).
+  * Set `options={"posts_per_page": 200}` to request 200 posts per page. The default is 4.
+  * Set `options={"image_hop_timeout": 2}` to delay the image cycling by n seconds, this is useful to prevent pinging fb a lot.
+  * Set `options={"HQ_images_max_count": 2}` to limit the max count of returned images.
+  * Set `options={"whitelist_methods": [<the method list you want to use for extraction>]}` to extract only specific sections of a post, this is useful to not use up your requests when you don't need to. Here is the list of methods you can use
+
+| method name               | description                                                               |
+|---------------------------|---------------------------------------------------------------------------|
+| extract_post_url          | will try to extract the unique post url                                   |
+| extract_post_id           | will try to extract the unique post_id                                    |
+| extract_text              | will try to extract the post's text and full text if needed               |
+| extract_time              | will try to extract the post's publishing timestamp                       |
+| extract_photo_link        | will try to extract the post's photos, including HQ photos                |
+| extract_image_lq*         | will try to extract low quality images for posts                          |
+| extract_comments          | will try to extract comments of a post, if enabled in options             |
+| extract_shares            | will try to extract shares of a post, if enabled in options               |
+| extract_links             | will try to extract links of a post                                       |
+| extract_user_id           | will try to extract the posting user's id, can be different than page_id  |
+| extract_username          | will try to extract the poster's username                                 |
+| extract_video             | will try to extract the video link of a post                              |
+| extract_video_thumbnail   | will try to extract the video thumbnail of a post                         |
+| extract_video_id          | will try to extract the video's id from a post                            |
+| extract_video_meta        | will try to extract the metadata of a video from a psot                   |
+| extract_is_live           | will try to extract whether a post's video was live or not                |
+| extract_factcheck         | will try to extract whether a post is fact checked or not                 |
+| extract_share_information | will try to extract sharing info (count) from a post                      |
+| extract_availability      | will try to extract whether a post is available or not (in case fo a 404) |
+| extract_listing           | will try to extract a marketplace listing if found                        |
+| extract_with              | will try to extract tagged accounts in a post ("user is with xxxxx")      |
+
+
+
 
 ## CLI usage
 
@@ -82,9 +142,9 @@ Download comments for a public Facebook post.
 import facebook_scraper as fs
 
 # get POST_ID from the URL of the post which can have the following structure:
-# https://www.facebook.com/USER/posts/POST_ID
-# https://www.facebook.com/groups/GROUP_ID/posts/POST_ID
-POST_ID = "pfbid02NsuAiBU9o1ouwBrw1vYAQ7khcVXvz8F8zMvkVat9UJ6uiwdgojgddQRLpXcVBqYbl"
+# https://mbasic.facebook.com/USER/posts/POST_ID
+# https://mbasic.facebook.com/groups/GROUP_ID/posts/POST_ID
+POST_ID = "https://mbasic.facebook.com/<pageId>/posts/<postId>"
 
 # number of comments to download -- set this to True to download all comments
 MAX_COMMENTS = 100
@@ -147,6 +207,9 @@ for comment in comments:
          '\n'
          'https://www.nintendo.com/amiibo/line-up/',
  'time': datetime.datetime(2019, 4, 30, 5, 0, 1),
+ 'full_text':'Don’t let this diminutive version of the Hero of Time fool you, '
+         'Young Link is just as heroic as his fully grown version! Young Link '
+         'joins the Super Smash Bros. series of amiibo figures!', # !! This will only be present if the post_text and text is truncated
  'user_id': '119240841493711',
  'username': 'Nintendo',
  'video': None,
@@ -309,8 +372,13 @@ for i in range(1, 101):
 
 ```
 
+
+## Funny Graphics 
+
+[![Star History Chart](https://api.star-history.com/svg?repos=moda20/facebook-scraper&type=Date)](https://star-history.com/#moda20/facebook-scraper&Date)
 ## To-Do
 
+- CLI update to work with the latest script updates (NEEDS HELP)
 - Async support
 - ~~Image galleries~~ (`images` entry)
 - ~~Profiles or post authors~~ (`get_profile()`)

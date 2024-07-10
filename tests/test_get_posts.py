@@ -87,7 +87,7 @@ class TestGetPosts:
         }
 
         post = next(get_posts(post_urls=[3065154550235644]))
-
+        print(post)
         assert post == expected_post
 
     def test_get_posts_with_extra_info(self):

@@ -13,7 +13,7 @@ from .constants import FB_MOBILE_BASE_URL, FB_MBASIC_BASE_URL
 
 from .fb_types import URL, Page, RawPage, RequestFunction, Response
 from . import exceptions
-
+from .internal_classes import PageClass
 
 logger = logging.getLogger(__name__)
 
@@ -32,7 +32,10 @@ def iter_hashtag_pages(hashtag: str, request_fn: RequestFunction, **kwargs) -> I
 def iter_pages(account: str, request_fn: RequestFunction, **kwargs) -> Iterator[Page]:
     start_url = kwargs.pop("start_url", None)
     if not start_url:
-        start_url = utils.urljoin(FB_MOBILE_BASE_URL, f'/{account}/')
+        start_url = utils.urljoin(
+            FB_MOBILE_BASE_URL,
+            f'/{account}',
+        )
     return generic_iter_pages(start_url, PageParser, request_fn, **kwargs)
 
 
@@ -70,7 +73,7 @@ def iter_photos(account: str, request_fn: RequestFunction, **kwargs) -> Iterator
 
 def generic_iter_pages(
     start_url, page_parser_cls, request_fn: RequestFunction, **kwargs
-) -> Iterator[Page]:
+) -> Iterator[PageClass]:
     next_url = start_url
 
     base_url = kwargs.get('base_url', FB_MOBILE_BASE_URL)
@@ -78,7 +81,12 @@ def generic_iter_pages(
     while next_url:
         # Execute callback of starting a new URL request
         if request_url_callback:
-            request_url_callback(next_url)
+            # The callback can return an exit code to stop the iteration
+            # This is useful in the cases where the requests triggers an infinite redirect loop.
+            exit_code = request_url_callback(next_url)
+            if exit_code:
+                logger.debug("Exit code %s received from request_url_callback, exiting", exit_code)
+                break
 
         RETRY_LIMIT = 6
         for retry in range(1, RETRY_LIMIT + 1):
@@ -105,7 +113,7 @@ def generic_iter_pages(
         page = parser.get_page()
 
         # TODO: If page is actually an iterable calling len(page) might consume it
-        logger.debug("Got %s raw posts from page", len(page))
+        logger.debug("Got %s raw posts from page", len(page.raw_posts))
         yield page
 
         logger.debug("Looking for next page URL")
@@ -115,6 +123,7 @@ def generic_iter_pages(
             if posts_per_page:
                 next_page = next_page.replace("num_to_fetch=4", f"num_to_fetch={posts_per_page}")
             next_url = utils.urljoin(base_url, next_page)
+            next_url = next_url.replace("amp;", f"")
         else:
             logger.info("Page parser did not find next page URL")
             next_url = None
@@ -133,6 +142,10 @@ class PageParser:
     cursor_regex_4 = re.compile(
         r'href\\":\\"\\+(/profile\\+/timeline\\+/stream[^"]+)\"'
     )  # scroll/cursor based, other requests
+    # adding new regex for the cursor
+    cursor_regex_5 = re.compile(
+        r'href="(/profile/timeline/stream/\?cursor[^"]+)"'
+    )  # scroll/cursor based, first request
 
     def __init__(self, response: Response):
         self.response = response
@@ -141,9 +154,37 @@ class PageParser:
 
         self._parse()
 
-    def get_page(self) -> Page:
+    def get_page(self) -> PageClass:
         # Select only elements that have the data-ft attribute
-        return self._get_page('article[data-ft*="top_level_post_id"]', 'article')
+        # it seems top_level_post_id is not always present, an update on the app is needed here but in case it's there
+        # we can use it
+        page = self._get_page('article[data-ft*="top_level_post_id"]', 'article')
+        if (len(page) == 0):
+            # TODO remove the backward compatible article selector
+            page = self._get_page('article[data-ft], div[role="article"][data-ft]', 'article')
+        return PageClass(page, self.get_page_info())
+
+    def get_page_info(self):
+        more_page_element = self.html.find('a[href*="/mbasic/more/?owner_id"]', first=True)
+        # TODO [Code quality] Refactor the regex search to use globally available
+        message_page_element = self.html.find('a[href^="/messages/thread/"]', first=True)
+        page_id_match = re.search(r'/messages/thread/(\d+)/', message_page_element.attrs.get('href')) if message_page_element else None
+
+        # type 2 of page_id matching
+        if page_id_match is None:
+            logger.debug("trying type 2 of page_id matching against \"intent://user/\"")
+            message_page_element = self.html.find('a[href^="intent://user/"]', first=True)
+            page_id_match = re.search(r'intent://user/(\d+)/',
+                                      message_page_element.attrs.get('href')) if message_page_element else None
+        return {
+            'user_id': self.html.find('a[href^="/mbasic/more/?owner_id"]', first=True)
+            .attrs.get('href')
+            .split('owner_id=')[1]
+            .split('&')[0]
+            if more_page_element
+            else None,
+            'page_id': page_id_match.group(1) if page_id_match else None
+        }
 
     def get_raw_page(self) -> RawPage:
         return self.html
@@ -171,6 +212,9 @@ class PageParser:
             value = match.groups()[0]
             return re.sub(r'\\+/', '/', value)
 
+        match = self.cursor_regex_5.search(self.cursor_blob)
+        if match:
+            return match.groups()[0]
         return None
 
     def _parse(self):
@@ -199,16 +243,19 @@ class PageParser:
     def _get_page(self, selection, selection_name) -> Page:
         raw_page = self.get_raw_page()
         raw_posts = raw_page.find(selection)
-        for post in raw_posts:
-            if not post.find("footer"):
+        # This is not an issue anymore as fb doesn't send bad HTML anymore
+        # TODO Remove this in the future as it's not needed
+        #for post in raw_posts:
+            #if not post.find("footer"):
+                # This is not an issue anymore as fb doesn't send bad HTML anymore
                 # Due to malformed HTML served by Facebook, lxml might misinterpret where the footer should go in article elements
                 # If we limit the parsing just to the section element, it fixes it
                 # Please forgive me for parsing HTML with regex
-                logger.warning(f"No footer in article - reparsing HTML within <section> element")
-                html = re.search(r'<section.+?>(.+)</section>', raw_page.html).group(1)
-                raw_page = utils.make_html_element(html=html)
-                raw_posts = raw_page.find(selection)
-                break
+                #logger.warning(f"No footer in article - reparsing HTML within <section> element")
+                #html = re.search(r'<section.+?>(.+)</section>', raw_page.html).group(1)
+                #raw_page = utils.make_html_element(html=html)
+                #raw_posts = raw_page.find(selection)
+                #break
 
         if not raw_posts:
             logger.warning(
@@ -231,6 +278,9 @@ class GroupPageParser(PageParser):
     """Class for parsing a single page of a group"""
 
     cursor_regex_3 = re.compile(r'href[=:]"(\/groups\/[^"]+bac=[^"]+)"')  # for Group requests
+    cursor_regex_3_basic_new = re.compile(
+        r'href[=:]"(\/groups\/[^"]+bacr=[^"]+)"'
+    )  # for mbasic Group requests 2023
 
     def get_next_page(self) -> Optional[URL]:
         next_page = super().get_next_page()
@@ -238,12 +288,18 @@ class GroupPageParser(PageParser):
             return next_page
 
         assert self.cursor_blob is not None
-
+        logger.debug("using extra page processor")
         match = self.cursor_regex_3.search(self.cursor_blob)
         if match:
             value = match.groups()[0]
             return value.encode('utf-8').decode('unicode_escape').replace('\\/', '/')
-
+        else:
+            match = self.cursor_regex_3_basic_new.search(self.cursor_blob)
+            return (
+                match.groups()[0].encode('utf-8').decode('unicode_escape').replace('\\/', '/')
+                if match
+                else None
+            )
         return None
 
     def _parse(self):
