@@ -11,7 +11,7 @@
 [![Code style: black](https://img.shields.io/badge/code%20style-black-000000.svg)](https://github.com/psf/black)
 
 Scrape Facebook public pages without an API key. Inspired by [twitter-scraper](https://github.com/kennethreitz/twitter-scraper).
-This is the repo from [moda20 version](https://github.com/moda20/facebook_page_scraper)
+This is the repo from [moda20 version](https://github.com/moda20/facebook-scraper)
 
 
 ## Contributions
